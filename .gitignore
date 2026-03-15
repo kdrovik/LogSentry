@@ -1,0 +1,44 @@
+# Build results
+[Dd]ebug/
+[Rr]elease/
+[Bb]in/
+[Oo]bj/
+build/
+
+# Logs
+[Ll]og/
+[Ll]ogs/
+*.log
+
+# Visual Studio files
+.vs/
+*.user
+*.userosscache
+*.suo
+*.userprefs
+
+# Publishing
+publish/
+*.pubxml
+*.pubxml.user
+
+# Project files
+project.lock.json
+project.fragment.lock.json
+
+# Binaries
+*.dll
+*.exe
+*.pdb
+*.cache
+*.swp
+*~
+
+# OS generated files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# IDEs
+.idea/
+.vscode/
