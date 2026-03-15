@@ -40,7 +40,7 @@ LogSentry subscribes to **ETW providers** at the OS level to observe:
 2. **DNS queries** (Microsoft-Windows-DNS-Client) — to spot domain names that look like **DGA** (Domain Generation Algorithm), often used by botnets/ransomware C2.
 3. **Registry writes** (Microsoft-Windows-Kernel-Registry) — to spot **persistence** via Run/RunOnce keys by non-trusted processes.
 
-A **correlation engine** (Cerebro) then combines these signals: if an **anomalous process** performs a **DGA-like DNS query** and **writes to a persistence key**, it raises a **High Priority Incident Report**. All events and reports are exported in **JSONL** (SIEM-friendly, machine-readable).
+An **Event Correlator** then combines these signals: if an **anomalous process** performs a **DGA-like DNS query** and **writes to a persistence key**, it raises a **High Priority Incident Report**. All events and reports are exported in **JSONL** (SIEM-friendly, machine-readable).
 
 ---
 
@@ -57,11 +57,11 @@ High-level flow:
    - **Microsoft-Windows-Kernel-Registry** (by GUID) — registry operations (e.g. set value).
 
 3. **Subscribe parsers and callbacks**
-   - **Radar** subscribes to `Kernel.ProcessStart` / `ProcessStop`, keeps a PID → process name cache, and evaluates parent-child and temp-path rules.
-   - **Oído** subscribes to `Dynamic.All` and filters by DNS-Client provider GUID, then extracts query name and runs DGA heuristics.
-   - **Vigilante** subscribes to `Dynamic.All` and filters by Kernel-Registry provider GUID, then checks key path (Run/RunOnce) and process trust.
+   - **Process Monitor** subscribes to `Kernel.ProcessStart` / `ProcessStop`, keeps a PID → process name cache, and evaluates parent-child and temp-path rules.
+   - **DNS Monitor** subscribes to `Dynamic.All` and filters by DNS-Client provider GUID, then extracts query name and runs DGA heuristics.
+   - **Registry Monitor** subscribes to `Dynamic.All` and filters by Kernel-Registry provider GUID, then checks key path (Run/RunOnce) and process trust.
 
-4. **Cerebro**
+4. **Event Correlator**
    - Receives all events from the three modules.
    - Appends every event to **JSONL** files under a configurable output directory.
    - Keeps a **per-PID, time-windowed** buffer of recent events; if the same process has **suspicious process** + **DGA DNS** + **persistence write** within the window, it emits a **High Priority Incident Report** (and optionally prints to console).
@@ -75,29 +75,29 @@ High-level flow:
 
 | Module | Purpose | ETW provider / API | Main logic |
 |--------|--------|--------------------|------------|
-| **1 – Radar (Process Monitor)** | Capture process start; detect parent-child and temp execution anomalies | `Microsoft-Windows-Kernel-Process` (kernel provider, `Keywords.Process`) | Parent-child: cmd/powershell child of notepad/calculator → alert. Temp: image path under `%LocalAppData%\Temp` → suspicious. |
-| **2 – Oído (DNS Sniffer)** | Capture DNS queries; flag DGA-like domains | `Microsoft-Windows-DNS-Client` (GUID) | Heuristics: random-looking label + suspicious TLD (e.g. xyz, top, tk); mix of digits/letters in label. |
-| **3 – Vigilante (Registry Guard)** | Monitor registry writes; focus on Run/RunOnce | `Microsoft-Windows-Kernel-Registry` (GUID) | Filter keys ending with `\...\CurrentVersion\Run` / `RunOnce`; alert if writer process is not in trusted list; record process name and value/command. |
-| **4 – Cerebro (Correlator & Logger)** | Correlate events; export JSONL; escalate combined sequence | N/A (consumes events from 1–3) | Same PID: suspicious process + DGA DNS + persistence write within time window → **High Priority** incident. All events and incidents written to JSONL. |
+| **1 – Process Monitor** | Capture process start; detect parent-child and temp execution anomalies | `Microsoft-Windows-Kernel-Process` (kernel provider, `Keywords.Process`) | Parent-child: cmd/powershell child of notepad/calculator → alert. Temp: image path under `%LocalAppData%\Temp` → suspicious. |
+| **2 – DNS Monitor** | Capture DNS queries; flag DGA-like domains | `Microsoft-Windows-DNS-Client` (GUID) | Heuristics: random-looking label + suspicious TLD (e.g. xyz, top, tk); mix of digits/letters in label. |
+| **3 – Registry Monitor** | Monitor registry writes; focus on Run/RunOnce | `Microsoft-Windows-Kernel-Registry` (GUID) | Filter keys ending with `\...\CurrentVersion\Run` / `RunOnce`; alert if writer process is not in trusted list; record process name and value/command. |
+| **4 – Event Correlator** | Correlate events; export JSONL; escalate combined sequence | N/A (consumes events from 1–3) | Same PID: suspicious process + DGA DNS + persistence write within time window → **High Priority** incident. All events and incidents written to JSONL. |
 
 Data flow:
 
 ```
 [ETW Session]
        │
-       ├──► Radar:    ProcessStart/Stop → PID cache, anomaly flags → ProcessStartEvent
-       ├──► Oído:    DNS-Client events → QueryName, DGA flag → DnsQueryEvent
-       └──► Vigilante: Kernel-Registry events → KeyPath, Value, trust → RegistryWriteEvent
+       ├──► Process Monitor:  ProcessStart/Stop → PID cache, anomaly flags → ProcessStartEvent
+       ├──► DNS Monitor:      DNS-Client events → QueryName, DGA flag → DnsQueryEvent
+       └──► Registry Monitor: Kernel-Registry events → KeyPath, Value, trust → RegistryWriteEvent
               │
               ▼
-       Cerebro: event handlers → JSONL export; per-PID buffer → High Priority if triple match
+       Event Correlator: event handlers → JSONL export; per-PID buffer → High Priority if triple match
 ```
 
 ---
 
 ## Detection Logic in Detail
 
-### Module 1 – Radar (Process)
+### Module 1 – Process Monitor
 
 - **Parent-Child Anomaly:**  
   Child process name is `cmd.exe` or `powershell.exe` **and** parent process name is `notepad.exe`, `calculator.exe`, or `calc.exe` → **immediate alert** (suspicious use of benign parents to launch shells).
@@ -106,13 +106,13 @@ Data flow:
 
 Process names and parent IDs are resolved from the kernel process events; parent name is taken from a cache updated on every ProcessStart.
 
-### Module 2 – Oído (DNS)
+### Module 2 – DNS Monitor
 
 - **DGA-style domains:**  
   Patterns such as short letter block + digits (e.g. `asdfg12345.xyz`) or long random-looking labels (e.g. 10–32 alphanumeric chars) with **suspicious TLDs** (e.g. `.xyz`, `.top`, `.tk`, `.pw`, `.work`, `.click`, etc.) → **DGA-suspicious**.  
   Additional heuristic: label length ≥ 8 with a high ratio of digits + letters and a short TLD.
 
-### Module 3 – Vigilante (Registry)
+### Module 3 – Registry Monitor
 
 - **Target keys:**  
   Paths containing `Microsoft\Windows\CurrentVersion\Run` or `RunOnce` (including `Wow6432Node` variants).
@@ -121,12 +121,12 @@ Process names and parent IDs are resolved from the kernel process events; parent
 - **Trusted list:**  
   Includes e.g. `svchost.exe`, `explorer.exe`, `msiexec.exe`, `OneDrive.exe`, security/installer-related binaries; others are treated as non-trusted for persistence.
 
-### Module 4 – Cerebro (Correlation)
+### Module 4 – Event Correlator
 
 - **Correlation window:**  
   Default **5 minutes** per process (per PID).
 - **High Priority rule:**  
-  For a given PID, if there is at least one **suspicious process** event (Radar), one **DGA-suspicious DNS** event (Oído), and one **persistence write** (Vigilante) in the window → one **High Priority Incident Report** is generated and exported (and optionally printed to console).
+  For a given PID, if there is at least one **suspicious process** event (Process Monitor), one **DGA-suspicious DNS** event (DNS Monitor), and one **persistence write** (Registry Monitor) in the window → one **High Priority Incident Report** is generated and exported (and optionally printed to console).
 
 ---
 
@@ -173,11 +173,11 @@ dotnet publish -c Release -r win-x64 --self-contained false
 1. **Run as Administrator** (recommended) so Kernel-Registry and kernel process providers work fully.
 2. Start LogSentry: `dotnet run` (or the published exe).
 3. Generate test signals (optional):
-   - **Parent-child anomaly:** Start Notepad, then from Notepad run `cmd.exe` (e.g. via Run or a script) → Radar should flag it.
-   - **Temp execution:** Run an executable from `%LocalAppData%\Temp` → Radar should mark it suspicious.
-   - **DGA:** Trigger a DNS query to a domain like `test12345abc.xyz` (if your test environment allows) → Oído may flag it.
-   - **Persistence:** Use a non-trusted process to add a value under `HKCU\...\Run` → Vigilante should alert.
-4. If the **same process** does all three (suspicious process + DGA DNS + persistence write) within the correlation window, Cerebro prints a **HIGH PRIORITY** message and writes an incident to JSONL.
+   - **Parent-child anomaly:** Start Notepad, then from Notepad run `cmd.exe` (e.g. via Run or a script) → Process Monitor should flag it.
+   - **Temp execution:** Run an executable from `%LocalAppData%\Temp` → Process Monitor should mark it suspicious.
+   - **DGA:** Trigger a DNS query to a domain like `test12345abc.xyz` (if your test environment allows) → DNS Monitor may flag it.
+   - **Persistence:** Use a non-trusted process to add a value under `HKCU\...\Run` → Registry Monitor should alert.
+4. If the **same process** does all three (suspicious process + DGA DNS + persistence write) within the correlation window, Event Correlator prints a **HIGH PRIORITY** message and writes an incident to JSONL.
 5. Inspect logs in the output directory (default: `%LocalAppData%\LogSentry` or the path you passed).
 
 ---
@@ -202,35 +202,35 @@ Optional first argument: **output directory** for JSONL files.
 ### Startup
 
 ```
-=== LogSentry — Real-Time Security Telemetry Sensor (ETW) ===
-Modules: Radar (Process) | Oído (DNS) | Vigilante (Registry) | Cerebro (Correlator)
+=== LogSentry ETW Monitor ===
+Modules: Process | DNS | Registry | Correlator
 
 Session: LogSentry_abc12def. Listening for ETW events (Ctrl+C to stop).
 Logs: C:\Users\You\AppData\Local\LogSentry
 ```
 
-### Radar (suspicious process)
+### Process Monitor (suspicious process)
 
 ```
-[Radar] Suspicious process: PID=12345 cmd.exe (Parent: notepad.exe) | ParentChildAnomaly=True TempAnomaly=False
+[Process Monitor] Suspicious process: PID=12345 cmd.exe (Parent: notepad.exe) | ParentChildAnomaly=True TempAnomaly=False
 ```
 
-### Oído (DGA-suspicious DNS)
+### DNS Monitor (DGA-suspicious DNS)
 
 ```
-[Oído] DGA-suspicious DNS: PID=12345 Query=asdfg12345.xyz
+[DNS Monitor] DGA-suspicious DNS: PID=12345 Query=asdfg12345.xyz
 ```
 
-### Vigilante (persistence write)
+### Registry Monitor (persistence write)
 
 ```
-[Vigilante] Persistence write: PID=12345 myapp.exe Key=...\CurrentVersion\Run Value=C:\malicious\app.exe
+[Registry Monitor] Persistence write: PID=12345 myapp.exe Key=...\CurrentVersion\Run Value=C:\malicious\app.exe
 ```
 
-### Cerebro (High Priority)
+### Event Correlator (High Priority)
 
 ```
-[Cerebro] HIGH PRIORITY: Correlated threat: anomalous process (PID 12345) performed DGA-like DNS query and wrote to persistence key.
+[Correlator] HIGH PRIORITY: Correlated threat: anomalous process (PID 12345) performed DGA-like DNS query and wrote to persistence key.
 ```
 
 ---
@@ -243,7 +243,7 @@ Logs: C:\Users\You\AppData\Local\LogSentry
   **JSONL** — one JSON object per line (one event or one incident report).
 - **Naming:**  
   `LogSentry_<Module>_<EventType>_<YYYYMMDD>.jsonl`  
-  Example: `LogSentry_Cerebro_CorrelatedIncident_20260314.jsonl`
+  Example: `LogSentry_Correlator_CorrelatedIncident_20260314.jsonl`
 - **Content:**  
   All `SecurityEventBase`-derived events (process, DNS, registry, incident) in a SIEM-friendly, machine-readable form (camelCase properties, timestamps, process IDs, names, key paths, etc.).
 
@@ -256,7 +256,7 @@ Logs: C:\Users\You\AppData\Local\LogSentry
 - **DGA heuristics:**  
   Pattern-based; legitimate or odd-looking domains can be flagged. Tune the rules or TLD list for your environment.
 - **Trusted process list:**  
-  Vigilante uses a fixed list; legitimate installers or tools not in the list can trigger persistence alerts. Adjust the list as needed.
+  Registry Monitor uses a fixed list; legitimate installers or tools not in the list can trigger persistence alerts. Adjust the list as needed.
 - **Parent-child rule:**  
   Intentionally strict (notepad/calculator → cmd/powershell). Legitimate automation (e.g. Notepad launching a script) can be flagged.
 - **Temp execution:**  
@@ -301,7 +301,7 @@ A: No. It is a **telemetry sensor** and **correlation/detection demo** for ETW. 
 A: Partially. Process and DNS may work; Kernel-Registry and full process details often require elevation.
 
 **Q: How do I reduce false positives?**  
-A: Adjust the trusted process list (Vigilante), the DGA patterns/TLD list (Oído), and the parent-child/suspicious-parent list (Radar) in the code to match your environment.
+A: Adjust the trusted process list (Registry Monitor), the DGA patterns/TLD list (DNS Monitor), and the parent-child/suspicious-parent list (Process Monitor) in the code to match your environment.
 
 **Q: Where are logs stored?**  
 A: By default in `%LocalAppData%\LogSentry`. Override with the first argument: `dotnet run -- "D:\Logs"`.
@@ -327,24 +327,13 @@ LogSentry/
 ├── LogSentry/
 │   ├── LogSentry.csproj
 │   ├── Program.cs               # Entry point, session setup, console wiring
-│   ├── ProcessMonitorRadar.cs   # Module 1: Kernel-Process, parent-child & temp anomalies
-│   ├── DnsSnifferOido.cs        # Module 2: DNS-Client, DGA detection
-│   ├── RegistryGuardVigilante.cs# Module 3: Kernel-Registry, Run/RunOnce, trust
-│   ├── CorrelatorCerebro.cs     # Module 4: Correlation, JSONL export, High Priority
+│   ├── ProcessMonitor.cs        # Module 1: Kernel-Process, parent-child & temp anomalies
+│   ├── DnsMonitor.cs            # Module 2: DNS-Client, DGA detection
+│   ├── RegistryMonitor.cs       # Module 3: Kernel-Registry, Run/RunOnce, trust
+│   ├── EventCorrelator.cs       # Module 4: Correlation, JSONL export, High Priority
 │   └── Models/
 │       └── SecurityEvent.cs     # ProcessStartEvent, DnsQueryEvent, RegistryWriteEvent, IncidentReport
 ```
-
----
-
-## References
-
-- [Event Tracing for Windows (ETW)](https://learn.microsoft.com/en-us/windows/win32/etw/about-event-tracing)
-- [Microsoft.Diagnostics.Tracing.TraceEvent (NuGet)](https://www.nuget.org/packages/Microsoft.Diagnostics.Tracing.TraceEvent)
-- [Using TraceEvent with OS ETW providers](https://learn.microsoft.com/en-us/archive/blogs/vancem/using-traceevent-to-mine-information-in-os-registered-etw-providers)
-- [MITRE ATT&CK – Persistence (Registry Run Keys)](https://attack.mitre.org/techniques/T1547/001/)
-- [MITRE ATT&CK – DGA](https://attack.mitre.org/techniques/T1568/002/)
-- [Microsoft-Windows-Kernel-Registry (ETW)](https://winevt-kb.readthedocs.io/en/latest/sources/eventlog-providers/Provider-Microsoft-Windows-Kernel-Registry.html)
 
 ---
 
